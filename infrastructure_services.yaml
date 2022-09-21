@@ -1,0 +1,157 @@
+Description: <
+   the compute services implemented (SG- LB - AS )
+Parameters:
+   EnvironmentName:
+     Description: An Environment name that will be prefixed to resources
+     Type: String
+   imageId:
+     Description: ami id based on the region by default it is in us-west-1
+     Type: String
+     Default: ami-09d2c265e123a3907
+   # KeyName:
+   #   Description: key name used in AS Configuration
+   #   Type: String
+   #   Default: monika-key-aws
+
+Resources:
+#1. security group , they are associated with the EC2/LB not VPC
+# traffic filter 
+   LBSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+         GroupDescription: Allow http to client host
+         VpcId:
+            Fn::ImportValue:
+                !Sub "${EnvironmentName}-vpc-id"
+         SecurityGroupIngress:
+         - IpProtocol: tcp
+           FromPort: 8080
+           ToPort: 8080
+           CidrIp: 0.0.0.0/0          
+         - IpProtocol: tcp
+           FromPort: 80
+           ToPort: 80
+           CidrIp: 0.0.0.0/0
+         SecurityGroupEgress:
+         - IpProtocol: tcp
+           FromPort: 0
+           ToPort: 65535
+           CidrIp: 0.0.0.0/0
+   InstanceSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+         GroupDescription: Allow http to client host
+         VpcId:
+            Fn::ImportValue:
+                !Sub "${EnvironmentName}-vpc-id" 
+         SecurityGroupIngress:
+         - IpProtocol: tcp
+           FromPort: 8080
+           ToPort: 8080
+           CidrIp: 0.0.0.0/0           
+         - IpProtocol: tcp
+           FromPort: 80
+           ToPort: 80
+           CidrIp: 0.0.0.0/0
+         - IpProtocol: tcp
+           FromPort: 22
+           ToPort: 22
+           CidrIp: 0.0.0.0/0
+         SecurityGroupEgress:
+         - IpProtocol: tcp
+           FromPort: 0
+           ToPort: 65535
+           CidrIp: 0.0.0.0/0        
+# create an AS group that will have the backend app 
+   ASGroup:
+      Type: AWS::AutoScaling::AutoScalingGroup
+      Properties:
+         VPCZoneIdentifier:
+         - Fn::ImportValue: 
+            !Sub "${EnvironmentName}-private-subnets"
+         LaunchConfigurationName:
+            Ref: LaunchConfig
+         MinSize: '2'
+         MaxSize: '3'
+         TargetGroupARNs: # this property will generate an error, unless there is LB 
+            - Ref: LBTargetGroup
+         HealthCheckGracePeriod: 60
+         HealthCheckType: ELB
+   LaunchConfig:
+      Type: AWS::AutoScaling::LaunchConfiguration
+      Properties:
+         ImageId: !Ref imageId
+         # KeyName: !Ref KeyName
+         SecurityGroups:
+         - Ref: InstanceSecurityGroup
+         InstanceType: t3.small
+         UserData:
+            Fn::Base64: !Sub |
+                 #!/bin/bash
+                 apt-get update -y
+                 apt-get install apache2 -y
+                 systemctl start apache2.service
+                 cd /var/www/html
+                 pwd 
+                 echo "Udacity Demo Web Server Up and Running!" > index.html 
+                 ls -l  
+                 cat index.html
+                 chmod 777 index.html
+                 curl http://fwd-project2.s3.us-west-1.amazonaws.com/index.html -o index.html 
+   # the target group config 
+   LBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      Port: 80 # port opened from the TG side VIP  
+      Protocol: HTTP
+      UnhealthyThresholdCount: 5
+      VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-vpc-id"   
+   LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PubSub1-id"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PubSub2-id"
+      SecurityGroups:
+      - Ref: LBSecurityGroup
+   Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn:
+          Ref: LBTargetGroup
+      LoadBalancerArn: #ARN == ID 
+        Ref: LoadBalancer
+      Port: '80' # port opened from user side
+      Protocol: HTTP
+   ListenerRule:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+        - Type: forward
+          TargetGroupArn: !Ref 'LBTargetGroup'
+        Conditions:
+        - Field: path-pattern
+          Values: [/]
+        ListenerArn: !Ref 'Listener'
+        Priority: 1                               
+Outputs:        
+  LoadbalancerDNS:
+    Description: the public url
+    Value: !Join [ "", [ "http://", !GetAtt LoadBalancer.DNSName ]]
+    Export: 
+      Name: !Sub ${EnvironmentName}-DNS-LB  
+  # EC2IDs:
+  #   Description: the public url
+  #   Value: !GetAtt ASGroup.instances
+  #   Export: 
+  #     Name: !Sub ${EnvironmentName}-EC2-AS
+
+
